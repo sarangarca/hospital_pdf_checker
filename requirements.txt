@@ -1,0 +1,7 @@
+streamlit
+PyMuPDF
+pytesseract
+pdf2image
+python-Levenshtein
+fuzzywuzzy
+pillow
