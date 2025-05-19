@@ -5,10 +5,13 @@ import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 from pdf2image import convert_from_path
+import pdf2image.exceptions
 from fuzzywuzzy import fuzz
 import tempfile
 import os
 import re
+import platform
+from typing import Optional, Dict, List
 
 SECTION_HEADERS = [
     "Discharge Summary",
@@ -31,6 +34,95 @@ FUZZY_THRESHOLD = st.sidebar.slider("Fuzzy Match Threshold", min_value=60, max_v
 # UI: Select document type
 st.sidebar.header("Document Type")
 doc_type = st.sidebar.radio("Select the type of document to analyze:", ["Discharge Summary", "Referral Form"])
+
+def check_tesseract() -> Optional[str]:
+    """
+    Check if Tesseract is installed and provide installation instructions if not.
+    Returns None if Tesseract is installed, or installation instructions if not.
+    """
+    try:
+        pytesseract.get_tesseract_version()
+        return None
+    except pytesseract.TesseractNotFoundError:
+        system = platform.system().lower()
+        if system == "darwin":
+            return (
+                "Tesseract is not installed. To install on macOS:\n"
+                "1. Install Homebrew if not already installed:\n"
+                "   /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n"
+                "2. Install Tesseract:\n"
+                "   brew install tesseract"
+            )
+        elif system == "linux":
+            return (
+                "Tesseract is not installed. To install on Linux:\n"
+                "Ubuntu/Debian:\n"
+                "   sudo apt-get update && sudo apt-get install tesseract-ocr\n"
+                "Fedora:\n"
+                "   sudo dnf install tesseract"
+            )
+        elif system == "windows":
+            return (
+                "Tesseract is not installed. To install on Windows:\n"
+                "1. Download the installer from: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "2. Run the installer and note the installation directory\n"
+                "3. Add the Tesseract installation directory to your PATH environment variable\n"
+                "4. Restart your computer"
+            )
+        return "Tesseract OCR is not installed. Please install it for your operating system."
+
+def check_pdf2image_dependencies() -> Optional[str]:
+    """
+    Check if pdf2image dependencies (poppler) are installed.
+    Returns None if dependencies are installed, or installation instructions if not.
+    """
+    try:
+        # Try a simple conversion to check if poppler is installed
+        with tempfile.NamedTemporaryFile(suffix='.pdf') as tmp:
+            convert_from_path(tmp.name)
+        return None
+    except Exception as e:
+        error_str = str(e).lower()
+        system = platform.system().lower()
+        
+        if system == "darwin":
+            return (
+                "Poppler is not installed. To install on macOS:\n"
+                "1. Install using Homebrew:\n"
+                "   brew install poppler\n"
+                "2. Restart your terminal"
+            )
+        elif system == "linux":
+            return (
+                "Poppler is not installed. To install on Linux:\n"
+                "Ubuntu/Debian:\n"
+                "   sudo apt-get update && sudo apt-get install poppler-utils\n"
+                "Fedora:\n"
+                "   sudo dnf install poppler-utils"
+            )
+        elif system == "windows":
+            return (
+                "Poppler is not installed. To install on Windows:\n"
+                "1. Download poppler for Windows from: http://blog.alivate.com.au/poppler-windows/\n"
+                "2. Extract to a directory (e.g., C:\\Program Files\\poppler)\n"
+                "3. Add the bin directory to your PATH environment variable\n"
+                "4. Restart your computer"
+            )
+        return f"PDF to image conversion failed. Please install poppler for your operating system. Error: {e}"
+
+# Check Tesseract installation on startup
+tesseract_error = check_tesseract()
+pdf2image_error = check_pdf2image_dependencies()
+
+if tesseract_error or pdf2image_error:
+    st.error("⚠️ Required Dependencies Missing")
+    if tesseract_error:
+        st.markdown("### Tesseract OCR Setup Required")
+        st.markdown(tesseract_error)
+    if pdf2image_error:
+        st.markdown("### PDF to Image Conversion Setup Required")
+        st.markdown(pdf2image_error)
+    st.stop()
 
 def extract_pdf_form_fields(pdf_path):
     """Extract form fields from a PDF using PyMuPDF."""
@@ -131,6 +223,39 @@ def extract_pdf_form_fields(pdf_path):
         if 'doc' in locals():
             doc.close()
 
+def convert_pdf_to_images(pdf_path: str, dpi: int = 300) -> list:
+    """
+    Convert PDF pages to images with better error handling.
+    """
+    try:
+        return convert_from_path(pdf_path, dpi=dpi)
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "not installed" in error_msg or "poppler" in error_msg:
+            st.error("PDF to image conversion failed: Poppler is not properly installed")
+            pdf2image_error = check_pdf2image_dependencies()
+            if pdf2image_error:
+                st.markdown(pdf2image_error)
+        else:
+            st.error(f"Failed to convert PDF to images: {str(e)}")
+        raise
+
+def extract_text_from_image(image: Image.Image) -> str:
+    """
+    Extract text from an image with improved error handling.
+    """
+    try:
+        return pytesseract.image_to_string(image)
+    except pytesseract.TesseractNotFoundError:
+        st.error("Tesseract OCR is not properly installed")
+        tesseract_error = check_tesseract()
+        if tesseract_error:
+            st.markdown(tesseract_error)
+        raise
+    except Exception as e:
+        st.error(f"OCR processing failed: {str(e)}")
+        raise
+
 def extract_text_from_pdf(pdf_path):
     text_per_page = []
     form_fields = extract_pdf_form_fields(pdf_path)
@@ -148,7 +273,7 @@ def extract_text_from_pdf(pdf_path):
                         text = f"{field_name}: {field_value}\n" + text
             
             if not text or len(text) < 20:
-                images = convert_from_path(pdf_path, first_page=page_num+1, last_page=page_num+1)
+                images = convert_pdf_to_images(pdf_path, first_page=page_num+1, last_page=page_num+1)
                 ocr_text = ""
                 for img in images:
                     ocr_text += pytesseract.image_to_string(img)
@@ -466,6 +591,32 @@ def extract_scanned_form_fields(pdf_path):
         if 'doc' in locals():
             doc.close()
 
+def process_pdf(pdf_path: str, doc_type: str = "Discharge Summary") -> dict:
+    """
+    Process a PDF file with comprehensive error handling.
+    """
+    try:
+        # First try to extract form fields (for digital PDFs)
+        form_fields = extract_pdf_form_fields(pdf_path)
+        
+        # If no form fields found or minimal content, try OCR
+        if not form_fields or sum(len(str(v)) for v in form_fields.values()) < 50:
+            images = convert_pdf_to_images(pdf_path)
+            extracted_text = "\n".join(extract_text_from_image(img) for img in images)
+            
+            if doc_type == "Discharge Summary":
+                return analyze_discharge_summary(extracted_text)
+            else:
+                return analyze_referral_form(extracted_text)
+        
+        return form_fields
+    except Exception as e:
+        st.error("❌ PDF Processing Failed")
+        st.error(str(e))
+        if isinstance(e, (pytesseract.TesseractNotFoundError, pdf2image.exceptions.PDFPageCountError)):
+            st.info("🔧 Please check the installation instructions in the README for setting up required dependencies.")
+        raise
+
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.read())
@@ -501,3 +652,33 @@ if uploaded_file is not None:
     os.remove(tmp_path)
 else:
     st.info("Please upload a PDF to begin analysis.")
+
+def analyze_discharge_summary(text: str) -> Dict[str, bool]:
+    """
+    Analyze discharge summary text for required sections.
+    """
+    sections_found = {header: False for header in SECTION_HEADERS}
+    
+    # Check for each section using fuzzy matching
+    for line in text.split('\n'):
+        for section in SECTION_HEADERS:
+            # Use fuzzy matching to account for OCR errors
+            if fuzz.ratio(line.lower(), section.lower()) >= FUZZY_THRESHOLD:
+                sections_found[section] = True
+                
+    return sections_found
+
+def analyze_referral_form(text: str) -> Dict[str, bool]:
+    """
+    Analyze referral form text for required fields.
+    """
+    fields_found = {keyword: False for keyword in REFERRAL_KEYWORDS}
+    
+    # Check for each required field using fuzzy matching
+    for line in text.split('\n'):
+        for keyword in REFERRAL_KEYWORDS:
+            # Use fuzzy matching to account for OCR errors
+            if fuzz.partial_ratio(line.lower(), keyword.lower()) >= FUZZY_THRESHOLD:
+                fields_found[keyword] = True
+                
+    return fields_found
